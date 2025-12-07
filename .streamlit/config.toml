@@ -1,0 +1,43 @@
+[server]
+headless = true
+enableCORS = false
+port = 8501
+
+[browser]
+gatherUsageStats = false
+```
+
+And create a `runtime.txt` file to specify Python version:
+```
+python-3.11
+```
+
+## **Verify Your Files:**
+
+Make sure these files exist and are correct:
+
+1. ✅ **`streamlit_app.py`** - Your main app (already good)
+2. ✅ **`requirements.txt`** - Dependencies (already good)
+3. ✅ **`.gitignore`** - Should ignore test files
+4. ❌ **`test_suite.py`** - Either delete or replace with fixed version
+
+## **After Pushing Changes:**
+
+1. Go to your Streamlit Cloud dashboard
+2. The app should automatically redeploy
+3. Check the logs - you should see:
+```
+   ✅ Processed dependencies!
+   ✅ Updated app!
+```
+
+## **If Still Having Issues:**
+
+Check that your GitHub repository structure looks like this:
+```
+your-repo/
+├── streamlit_app.py          ← Main file
+├── requirements.txt           ← Dependencies
+├── .gitignore                 ← Git ignore
+├── README.md                  ← Documentation
+└── (other React files)        ← Not used by Streamlit
