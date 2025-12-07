@@ -1,12 +1,26 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
-import google.generativeai as genai
 import json
-import plotly.express as px
-import plotly.graph_objects as go
 from io import StringIO
 import os
+import sys
+
+# Check for required packages
+try:
+    import google.generativeai as genai
+except ImportError:
+    st.error("⚠️ Missing required package: google-generativeai")
+    st.info("Please install it using: pip install google-generativeai")
+    st.stop()
+
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+except ImportError:
+    st.error("⚠️ Missing required package: plotly")
+    st.info("Please install it using: pip install plotly")
+    st.stop()
 
 # Page configuration
 st.set_page_config(
@@ -43,6 +57,12 @@ st.markdown("""
         color: #155724;
         margin: 1rem 0;
     }
+    .metric-card {
+        background-color: #f8f9fa;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border: 1px solid #dee2e6;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -55,25 +75,38 @@ if 'query_history' not in st.session_state:
     st.session_state.query_history = []
 if 'db_initialized' not in st.session_state:
     st.session_state.db_initialized = False
+if 'db_conn' not in st.session_state:
+    st.session_state.db_conn = None
 
 # Database functions
 def init_database():
     """Initialize SQLite database connection"""
-    conn = sqlite3.connect(':memory:', check_same_thread=False)
-    st.session_state.db_conn = conn
-    st.session_state.db_initialized = True
-    return conn
+    try:
+        conn = sqlite3.connect(':memory:', check_same_thread=False)
+        st.session_state.db_conn = conn
+        st.session_state.db_initialized = True
+        return conn
+    except Exception as e:
+        st.error(f"Failed to initialize database: {str(e)}")
+        return None
 
 def get_db_connection():
     """Get or create database connection"""
-    if not st.session_state.db_initialized:
+    if not st.session_state.db_initialized or st.session_state.db_conn is None:
         return init_database()
     return st.session_state.db_conn
 
 def create_table_from_csv(df, table_name):
     """Create a table from a pandas DataFrame"""
     try:
+        # Sanitize table name
+        table_name = table_name.replace('-', '_').replace(' ', '_')
+        table_name = ''.join(c for c in table_name if c.isalnum() or c == '_')
+        
         conn = get_db_connection()
+        if conn is None:
+            return False, "Database connection failed"
+        
         df.to_sql(table_name, conn, if_exists='replace', index=False)
         
         # Get schema information
@@ -84,7 +117,8 @@ def create_table_from_csv(df, table_name):
         
         st.session_state.tables[table_name] = {
             'columns': schema,
-            'row_count': len(df)
+            'row_count': len(df),
+            'dataframe': df.head(100)  # Store preview
         }
         return True, f"Table '{table_name}' created successfully with {len(df)} rows!"
     except Exception as e:
@@ -108,7 +142,7 @@ def generate_sql_query(question, api_key):
     """Use Gemini to generate SQL query from natural language"""
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-pro')
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
         schema = get_table_schema()
         prompt = f"""You are an expert SQL query generator. Given the following database schema and a question, generate a valid SQLite SQL query.
@@ -120,9 +154,11 @@ Question: {question}
 Important instructions:
 1. Return ONLY the SQL query without any explanation, markdown formatting, or additional text
 2. Do not include ```sql or ``` markers
-3. The query should be a single line
+3. The query should be a single line or properly formatted SQL
 4. Use proper SQLite syntax
 5. Make sure table and column names match exactly with the schema provided
+6. For aggregate queries, use appropriate GROUP BY clauses
+7. Use LIMIT to restrict large result sets when appropriate
 
 SQL Query:"""
 
@@ -140,6 +176,9 @@ def execute_query(sql_query):
     """Execute SQL query and return results"""
     try:
         conn = get_db_connection()
+        if conn is None:
+            return None, "Database connection failed"
+        
         df = pd.read_sql_query(sql_query, conn)
         return df, None
     except Exception as e:
@@ -150,28 +189,32 @@ def create_visualization(df, query):
     if df is None or len(df) == 0:
         return None
     
-    # Determine best chart type based on data
-    if len(df.columns) >= 2:
-        numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
-        
-        if len(numeric_cols) >= 1:
-            # If we have one numeric column and one categorical
-            if len(numeric_cols) == 1:
-                x_col = df.columns[0]
-                y_col = numeric_cols[0]
-                
-                # Bar chart for aggregated data
-                if len(df) <= 20:
-                    fig = px.bar(df, x=x_col, y=y_col, title="Query Results")
-                else:
-                    fig = px.line(df, x=x_col, y=y_col, title="Query Results")
-                return fig
+    try:
+        # Determine best chart type based on data
+        if len(df.columns) >= 2:
+            numeric_cols = df.select_dtypes(include=['int64', 'float64', 'int32', 'float32']).columns
             
-            # Multiple numeric columns - line chart
-            elif len(numeric_cols) > 1 and len(df) <= 50:
-                fig = px.line(df, x=df.columns[0], y=numeric_cols.tolist(), 
-                            title="Query Results")
-                return fig
+            if len(numeric_cols) >= 1:
+                # If we have one numeric column and one categorical
+                if len(numeric_cols) == 1:
+                    x_col = df.columns[0]
+                    y_col = numeric_cols[0]
+                    
+                    # Bar chart for aggregated data
+                    if len(df) <= 20:
+                        fig = px.bar(df, x=x_col, y=y_col, title="Query Results Visualization")
+                    else:
+                        fig = px.line(df, x=x_col, y=y_col, title="Query Results Visualization")
+                    return fig
+                
+                # Multiple numeric columns - line chart
+                elif len(numeric_cols) > 1 and len(df) <= 50:
+                    fig = px.line(df, x=df.columns[0], y=numeric_cols.tolist(), 
+                                title="Query Results Visualization")
+                    return fig
+    except Exception as e:
+        st.warning(f"Could not create visualization: {str(e)}")
+        return None
     
     return None
 
@@ -196,6 +239,8 @@ def main():
         if api_key:
             st.session_state.api_key = api_key
             st.success("✅ API Key configured")
+        else:
+            st.warning("⚠️ API Key required")
         
         st.divider()
         
@@ -208,22 +253,30 @@ def main():
         )
         
         if uploaded_file is not None:
-            df = pd.read_csv(uploaded_file)
-            
-            table_name = st.text_input(
-                "Table Name",
-                value=uploaded_file.name.replace('.csv', '').replace(' ', '_'),
-                help="Name for your database table"
-            )
-            
-            if st.button("📊 Create Table"):
-                with st.spinner("Creating table..."):
-                    success, message = create_table_from_csv(df, table_name)
-                    if success:
-                        st.success(message)
-                        st.dataframe(df.head())
+            try:
+                df = pd.read_csv(uploaded_file)
+                
+                st.success(f"✅ File loaded: {len(df)} rows × {len(df.columns)} columns")
+                
+                table_name = st.text_input(
+                    "Table Name",
+                    value=uploaded_file.name.replace('.csv', '').replace(' ', '_').replace('-', '_'),
+                    help="Name for your database table (alphanumeric and underscores only)"
+                )
+                
+                if st.button("📊 Create Table", type="primary"):
+                    if table_name:
+                        with st.spinner("Creating table..."):
+                            success, message = create_table_from_csv(df, table_name)
+                            if success:
+                                st.success(message)
+                                st.dataframe(df.head(5), use_container_width=True)
+                            else:
+                                st.error(message)
                     else:
-                        st.error(message)
+                        st.error("Please provide a table name")
+            except Exception as e:
+                st.error(f"Error reading CSV file: {str(e)}")
         
         st.divider()
         
@@ -235,7 +288,22 @@ def main():
                     st.write(f"**Rows:** {info['row_count']}")
                     st.write("**Columns:**")
                     for col, dtype in info['columns'].items():
-                        st.write(f"- {col} ({dtype})")
+                        st.write(f"- `{col}` ({dtype})")
+                    
+                    if 'dataframe' in info:
+                        st.write("**Preview:**")
+                        st.dataframe(info['dataframe'], use_container_width=True)
+        
+        st.divider()
+        
+        # Clear all data button
+        if st.session_state.tables:
+            if st.button("🗑️ Clear All Tables", type="secondary"):
+                st.session_state.tables = {}
+                st.session_state.query_history = []
+                st.session_state.db_initialized = False
+                st.session_state.db_conn = None
+                st.rerun()
     
     # Main content
     if not st.session_state.api_key:
@@ -254,21 +322,48 @@ def main():
         
         # Sample CSV download
         st.subheader("Need sample data?")
-        sample_data = pd.DataFrame({
-            'id': [1, 2, 3, 4, 5],
-            'name': ['Alice', 'Bob', 'Charlie', 'David', 'Eve'],
-            'age': [25, 30, 35, 28, 32],
-            'department': ['Engineering', 'Marketing', 'Engineering', 'Sales', 'Marketing'],
-            'salary': [75000, 65000, 85000, 60000, 70000]
-        })
+        col1, col2 = st.columns(2)
         
-        csv = sample_data.to_csv(index=False)
-        st.download_button(
-            label="📥 Download Sample CSV",
-            data=csv,
-            file_name="sample_employees.csv",
-            mime="text/csv"
-        )
+        with col1:
+            st.write("**Sample Employees Dataset**")
+            sample_data = pd.DataFrame({
+                'id': [1, 2, 3, 4, 5],
+                'name': ['Alice', 'Bob', 'Charlie', 'David', 'Eve'],
+                'age': [25, 30, 35, 28, 32],
+                'department': ['Engineering', 'Marketing', 'Engineering', 'Sales', 'Marketing'],
+                'salary': [75000, 65000, 85000, 60000, 70000]
+            })
+            
+            st.dataframe(sample_data)
+            csv = sample_data.to_csv(index=False)
+            st.download_button(
+                label="📥 Download Sample CSV",
+                data=csv,
+                file_name="sample_employees.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        
+        with col2:
+            st.write("**Sample Sales Dataset**")
+            sample_sales = pd.DataFrame({
+                'order_id': [101, 102, 103, 104, 105],
+                'product': ['Laptop', 'Mouse', 'Keyboard', 'Monitor', 'Laptop'],
+                'quantity': [1, 3, 2, 1, 2],
+                'price': [1200, 25, 75, 350, 1200],
+                'date': ['2024-01-15', '2024-01-16', '2024-01-16', '2024-01-17', '2024-01-18']
+            })
+            
+            st.dataframe(sample_sales)
+            csv_sales = sample_sales.to_csv(index=False)
+            st.download_button(
+                label="📥 Download Sales CSV",
+                data=csv_sales,
+                file_name="sample_sales.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        
         return
     
     # Query interface
@@ -285,6 +380,8 @@ def main():
             - Count how many people work in each department
             - Who has the highest salary?
             - Show me employees older than 30
+            - Calculate the total sales by product
+            - What are the top 5 most expensive items?
             """)
         
         question = st.text_area(
@@ -309,7 +406,7 @@ def main():
                         df_result, error = execute_query(sql_query)
                         
                         if error:
-                            st.error(f"Query execution error: {error}")
+                            st.error(f"❌ Query execution error: {error}")
                         else:
                             st.success("✅ Query executed successfully!")
                             
@@ -317,17 +414,20 @@ def main():
                             st.session_state.query_history.append({
                                 'question': question,
                                 'sql': sql_query,
-                                'timestamp': pd.Timestamp.now()
+                                'timestamp': pd.Timestamp.now(),
+                                'rows': len(df_result)
                             })
                             
                             # Display results
                             st.subheader("📊 Results")
-                            st.dataframe(df_result, use_container_width=True)
                             
                             # Show stats
                             col1, col2, col3 = st.columns(3)
                             col1.metric("Rows Returned", len(df_result))
                             col2.metric("Columns", len(df_result.columns))
+                            col3.metric("Total Queries", len(st.session_state.query_history))
+                            
+                            st.dataframe(df_result, use_container_width=True)
                             
                             # Visualization
                             fig = create_visualization(df_result, sql_query)
@@ -345,6 +445,7 @@ def main():
                             
                 except Exception as e:
                     st.error(f"❌ Error: {str(e)}")
+                    st.info("💡 Tip: Make sure your question clearly references table and column names from your schema.")
     
     with tab2:
         st.subheader("Write SQL Query Directly")
@@ -352,7 +453,7 @@ def main():
         sql_input = st.text_area(
             "SQL Query",
             height=150,
-            placeholder="SELECT * FROM your_table LIMIT 10"
+            placeholder="SELECT * FROM your_table LIMIT 10;"
         )
         
         if st.button("▶️ Execute Query", type="primary"):
@@ -361,15 +462,32 @@ def main():
                     df_result, error = execute_query(sql_input)
                     
                     if error:
-                        st.error(f"Query execution error: {error}")
+                        st.error(f"❌ Query execution error: {error}")
                     else:
                         st.success("✅ Query executed successfully!")
+                        
+                        # Show stats
+                        col1, col2 = st.columns(2)
+                        col1.metric("Rows Returned", len(df_result))
+                        col2.metric("Columns", len(df_result.columns))
+                        
                         st.dataframe(df_result, use_container_width=True)
                         
                         # Visualization
                         fig = create_visualization(df_result, sql_input)
                         if fig:
                             st.plotly_chart(fig, use_container_width=True)
+                        
+                        # Download option
+                        csv = df_result.to_csv(index=False)
+                        st.download_button(
+                            label="📥 Download Results as CSV",
+                            data=csv,
+                            file_name="query_results.csv",
+                            mime="text/csv"
+                        )
+            else:
+                st.warning("Please enter a SQL query")
     
     with tab3:
         st.subheader("Query History")
@@ -379,6 +497,15 @@ def main():
                 with st.expander(f"Query {len(st.session_state.query_history) - idx}: {item['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}"):
                     st.write("**Question:**", item['question'])
                     st.code(item['sql'], language="sql")
+                    st.write(f"**Rows returned:** {item['rows']}")
+                    
+                    # Re-execute button
+                    if st.button(f"🔄 Re-execute", key=f"rerun_{idx}"):
+                        df_result, error = execute_query(item['sql'])
+                        if error:
+                            st.error(f"Error: {error}")
+                        else:
+                            st.dataframe(df_result, use_container_width=True)
         else:
             st.info("No query history yet. Start asking questions!")
 
