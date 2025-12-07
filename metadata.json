@@ -1,0 +1,5 @@
+{
+  "name": "Copy of Gemini Text-to-SQL Pro",
+  "description": "An enterprise-grade Text-to-SQL application powered by Google Gemini. Features CSV ingestion, schema understanding, SQL generation, and dynamic data visualization.",
+  "requestFramePermissions": []
+}
